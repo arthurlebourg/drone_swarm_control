@@ -92,16 +92,35 @@ class DroneLayer implements mapboxgl.CustomLayerInterface {
         return instancedMesh
     }
 
+    public getDroneScreenPosition(index: number, screenWidth: number, screenHeight: number): { x: number, y: number } | null {
+        if (!this.instancedMesh || !this.camera) return null;
+
+        const matrix = new THREE.Matrix4();
+        this.instancedMesh.getMatrixAt(index, matrix);
+
+        const position = new THREE.Vector3().setFromMatrixPosition(matrix);
+
+        const vec4 = new THREE.Vector4(position.x, position.y, position.z, 1.0);
+        vec4.applyMatrix4(this.camera.projectionMatrix);
+
+        const ndcX = vec4.x / vec4.w;
+        const ndcY = vec4.y / vec4.w;
+
+        const x = (ndcX + 1) / 2 * screenWidth;
+        const y = (1 - ndcY) / 2 * screenHeight;
+
+        return { x, y };
+    }
+
     public highlightDrones(selectedIndices: number[]) {
-        const defaultColor = new THREE.Color(0x00ffff); // Cyan
-        const highlightColor = new THREE.Color(0xff00ff); // Magenta pour la sélection
+        const defaultColor = new THREE.Color(0x00ffff);
+        const highlightColor = new THREE.Color(0xff00ff);
 
         for (let i = 0; i < SWARM_SIZE; i++) {
             const isSelected = selectedIndices.includes(i);
             this.instancedMesh.setColorAt(i, isSelected ? highlightColor : defaultColor);
         }
 
-        // On prévient Three.js de mettre à jour la carte graphique
         this.instancedMesh.instanceColor!.needsUpdate = true;
         this.map?.triggerRepaint();
     }
@@ -116,40 +135,32 @@ class DroneLayer implements mapboxgl.CustomLayerInterface {
         this.renderer.autoClear = false;
     }
 
-    render(gl: WebGLRenderingContext, matrix: number[]) {
+    render(_gl: WebGLRenderingContext, matrix: number[]) {
         if (!this.renderer || !this.map) return;
 
-        // --- LA MAGIE EST ICI ---
-        // 1. On récupère la matrice absolue de Mapbox
         const mapboxMatrix = new THREE.Matrix4().fromArray(matrix);
 
-        // 2. On crée une matrice de translation basée sur notre centre (calculé en Float64)
         const translationMatrix = new THREE.Matrix4().makeTranslation(
             this.centerMercator.x,
             this.centerMercator.y,
             this.centerMercator.z || 0
         );
 
-        // 3. On combine les deux. La caméra Three.js considère maintenant que (0,0,0) est au barycentre de l'essaim.
         this.camera.projectionMatrix = mapboxMatrix.multiply(translationMatrix);
 
         this.swarmData.forEach((data, index) => {
             const groundElevation = this.map!.queryTerrainElevation([data.lng, data.lat]) || 520;
             const finalAltitude = groundElevation + data.relativeHeight;
 
-            // Coordonnées absolues du drone
             const droneMercator = mapboxgl.MercatorCoordinate.fromLngLat(
                 [data.lng, data.lat],
                 finalAltitude
             );
 
-            // 4. POSITION LOCALE : On soustrait le centre au drone.
-            // Ce calcul est fait en JS (Float64), le résultat est un chiffre très petit et hyper précis.
             const localX = droneMercator.x - this.centerMercator.x;
             const localY = droneMercator.y - this.centerMercator.y;
             const localZ = (droneMercator.z || 0) - (this.centerMercator.z || 0);
 
-            // On place le drone sur sa position locale
             this.dummy.position.set(localX, localY, localZ);
 
             const unitsPerMeter = droneMercator.meterInMercatorCoordinateUnits();

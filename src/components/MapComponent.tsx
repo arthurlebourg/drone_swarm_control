@@ -2,15 +2,18 @@ import React, { useRef, useEffect, useState } from 'react';
 import mapboxgl from 'mapbox-gl';
 import 'mapbox-gl/dist/mapbox-gl.css';
 import DroneLayer, { getSwarmBarycenter, getSwarmBounds, swarmData } from './DroneLayer';
+import { useDroneStore } from '../hooks/useDroneStore';
+import DroneSidebar from './DroneSidebar';
 
 mapboxgl.accessToken = import.meta.env.VITE_MAPBOX_TOKEN;
 
 const MapComponent: React.FC = () => {
     const mapContainer = useRef<HTMLDivElement>(null);
     const map = useRef<mapboxgl.Map | null>(null);
-    const droneLayerRef = useRef<DroneLayer | null>(null); // Pour stocker notre layer Three.js
+    const droneLayerRef = useRef<DroneLayer | null>(null);
 
-    // États pour la sélection
+    const { selectedDrones, setSelectedDrones, clearSelection } = useDroneStore();
+
     const [isSelectionMode, setIsSelectionMode] = useState(false);
     const [selectionBox, setSelectionBox] = useState<{ startX: number, startY: number, currentX: number, currentY: number } | null>(null);
 
@@ -26,7 +29,8 @@ const MapComponent: React.FC = () => {
             zoom: 12,
             pitch: 65,
             bearing: 20,
-            antialias: true
+            antialias: true,
+            maxZoom: 22
         });
 
         map.current.on('style.load', () => {
@@ -63,7 +67,7 @@ const MapComponent: React.FC = () => {
                 padding: { top: 100, bottom: 100, left: 100, right: 100 },
                 pitch: 65,
                 bearing: 20,
-                maxZoom: 16,
+                maxZoom: 18,
                 duration: 2000
             });
         });
@@ -74,7 +78,12 @@ const MapComponent: React.FC = () => {
         };
     }, []);
 
-    // GESTION DE LA SOURIS POUR LE DESSIN DU RECTANGLE
+    useEffect(() => {
+        if (droneLayerRef.current) {
+            droneLayerRef.current.highlightDrones(selectedDrones);
+        }
+    }, [selectedDrones]);
+
     const handleMouseDown = (e: React.MouseEvent) => {
         if (!isSelectionMode) return;
         setSelectionBox({
@@ -93,39 +102,38 @@ const MapComponent: React.FC = () => {
     const handleMouseUp = () => {
         if (!isSelectionMode || !selectionBox || !map.current || !droneLayerRef.current) return;
 
-        // 1. Définir les limites du rectangle en pixels
-        const minX = Math.min(selectionBox.startX, selectionBox.currentX);
-        const maxX = Math.max(selectionBox.startX, selectionBox.currentX);
-        const minY = Math.min(selectionBox.startY, selectionBox.currentY);
-        const maxY = Math.max(selectionBox.startY, selectionBox.currentY);
+        const canvas = map.current.getCanvas();
+        const rect = canvas.getBoundingClientRect();
+        const { clientWidth, clientHeight } = canvas;
 
-        // 2. Trouver quels drones sont dans le rectangle
-        const selectedIndices: number[] = [];
+        const minX = Math.min(selectionBox.startX, selectionBox.currentX) - rect.left;
+        const maxX = Math.max(selectionBox.startX, selectionBox.currentX) - rect.left;
+        const minY = Math.min(selectionBox.startY, selectionBox.currentY) - rect.top;
+        const maxY = Math.max(selectionBox.startY, selectionBox.currentY) - rect.top;
 
-        swarmData.forEach((drone, index) => {
-            // map.project() transforme les coordonnées GPS en position X/Y sur l'écran !
-            const screenPosition = map.current!.project([drone.lng, drone.lat]);
+        const newSelectedIndices: number[] = [];
+
+        swarmData.forEach((_, index) => {
+            const screenPosition = droneLayerRef.current!.getDroneScreenPosition(index, clientWidth, clientHeight);
 
             if (
+                screenPosition &&
                 screenPosition.x >= minX && screenPosition.x <= maxX &&
                 screenPosition.y >= minY && screenPosition.y <= maxY
             ) {
-                selectedIndices.push(index);
+                newSelectedIndices.push(index);
             }
         });
 
-        // 3. Envoyer les indices sélectionnés au layer Three.js
-        droneLayerRef.current.highlightDrones(selectedIndices);
-
-        // 4. Nettoyer
+        setSelectedDrones(newSelectedIndices);
+        setIsSelectionMode(false);
         setSelectionBox(null);
     };
 
-    // ACTIVER / DÉSACTIVER LES CONTRÔLES MAPBOX
     useEffect(() => {
         if (!map.current) return;
         if (isSelectionMode) {
-            map.current.dragPan.disable(); // Empêche la carte de bouger quand on dessine
+            map.current.dragPan.disable();
         } else {
             map.current.dragPan.enable();
         }
@@ -134,10 +142,12 @@ const MapComponent: React.FC = () => {
     return (
         <div style={{ position: 'relative', width: '100vw', height: '100vh', overflow: 'hidden' }}>
 
-            {/* L'UI PAR DESSUS LA CARTE */}
             <div style={{ position: 'absolute', top: 20, left: 20, zIndex: 10, display: 'flex', gap: '10px' }}>
                 <button
-                    onClick={() => setIsSelectionMode(!isSelectionMode)}
+                    onClick={() => {
+                        setIsSelectionMode(!isSelectionMode);
+                        if (isSelectionMode) clearSelection();
+                    }}
                     style={{
                         padding: '10px 20px',
                         cursor: 'pointer',
@@ -151,9 +161,20 @@ const MapComponent: React.FC = () => {
                 >
                     {isSelectionMode ? 'Cancel Selection' : 'Select Drones'}
                 </button>
+
+                {selectedDrones.length > 0 && (
+                    <div style={{
+                        padding: '10px 20px',
+                        backgroundColor: '#222',
+                        color: '#fff',
+                        borderRadius: '5px',
+                        fontWeight: 'bold'
+                    }}>
+                        {selectedDrones.length} Selected
+                    </div>
+                )}
             </div>
 
-            {/* LE DIV INVISIBLE QUI CAPTURE LA SOURIS QUAND LE MODE EST ACTIF */}
             {isSelectionMode && (
                 <div
                     onMouseDown={handleMouseDown}
@@ -161,7 +182,6 @@ const MapComponent: React.FC = () => {
                     onMouseUp={handleMouseUp}
                     style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', zIndex: 5, cursor: 'crosshair' }}
                 >
-                    {/* LE DESSIN DU RECTANGLE */}
                     {selectionBox && (
                         <div style={{
                             position: 'absolute',
@@ -171,14 +191,15 @@ const MapComponent: React.FC = () => {
                             height: Math.abs(selectionBox.currentY - selectionBox.startY),
                             border: '2px solid #ff00ff',
                             backgroundColor: 'rgba(255, 0, 255, 0.2)',
-                            pointerEvents: 'none' // Pour ne pas bloquer les événements de souris
+                            pointerEvents: 'none'
                         }} />
                     )}
                 </div>
             )}
 
-            {/* LE CONTENEUR MAPBOX */}
             <div ref={mapContainer} style={{ width: '100%', height: '100%' }} />
+
+            <DroneSidebar />
         </div>
     );
 };
