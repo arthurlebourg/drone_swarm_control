@@ -1,8 +1,8 @@
-import React, { useEffect, useRef } from 'react';
+import { useEffect, useRef, type FC } from 'react';
 import { useDroneStore } from '../hooks/useDroneStore';
 import { swarmData } from './DroneLayer';
 
-const DroneSidebar: React.FC = () => {
+const DroneSidebar: FC = () => {
     const { selectedDrones } = useDroneStore();
 
     const latRefs = useRef<{ [key: number]: HTMLSpanElement | null }>({});

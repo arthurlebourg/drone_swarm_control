@@ -1,4 +1,4 @@
-import React, { useRef, useEffect, useState } from 'react';
+import { useRef, useEffect, useState, type FC, type MouseEvent } from 'react';
 import mapboxgl from 'mapbox-gl';
 import 'mapbox-gl/dist/mapbox-gl.css';
 import DroneLayer, { getSwarmBarycenter, getSwarmBounds, swarmData } from './DroneLayer';
@@ -7,8 +7,7 @@ import DroneSidebar from './DroneSidebar';
 
 mapboxgl.accessToken = import.meta.env.VITE_MAPBOX_TOKEN;
 
-
-const MapComponent: React.FC = () => {
+const MapComponent: FC = () => {
     const mapContainer = useRef<HTMLDivElement>(null);
     const map = useRef<mapboxgl.Map | null>(null);
     const droneLayerRef = useRef<DroneLayer | null>(null);
@@ -118,7 +117,7 @@ const MapComponent: React.FC = () => {
         }
     }, [selectedDrones]);
 
-    const handleMouseDown = (e: React.MouseEvent) => {
+    const handleMouseDown = (e: MouseEvent) => {
         if (!isSelectionMode) return;
         setSelectionBox({
             startX: e.clientX,
@@ -128,7 +127,7 @@ const MapComponent: React.FC = () => {
         });
     };
 
-    const handleMouseMove = (e: React.MouseEvent) => {
+    const handleMouseMove = (e: MouseEvent) => {
         if (!isSelectionMode || !selectionBox) return;
         setSelectionBox({ ...selectionBox, currentX: e.clientX, currentY: e.clientY });
     };

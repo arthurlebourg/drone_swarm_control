@@ -140,60 +140,88 @@ class DroneLayer implements mapboxgl.CustomLayerInterface {
         const seen = new Set();
 
         features.forEach(f => {
-            if (!f.properties || !f.geometry) return;
+            if (!f.properties || !f.geometry || f.geometry.type !== 'Polygon') return;
+
             const id = f.id || Math.random().toString();
             if (seen.has(id)) return;
             seen.add(id);
 
+            const rawCoords = f.geometry.coordinates[0];
+            if (!rawCoords || rawCoords.length < 3) return;
+
             const height = f.properties.height || 10;
-            let minLng = 180, maxLng = -180, minLat = 90, maxLat = -90;
-            let hasCoords = false;
 
-            if (f.geometry.type === 'Polygon') {
-                f.geometry.coordinates[0].forEach((coord: any) => {
-                    minLng = Math.min(minLng, coord[0]);
-                    maxLng = Math.max(maxLng, coord[0]);
-                    minLat = Math.min(minLat, coord[1]);
-                    maxLat = Math.max(maxLat, coord[1]);
-                    hasCoords = true;
-                });
+            const mercPoints = rawCoords.map((coord: any) => mapboxgl.MercatorCoordinate.fromLngLat(coord));
+
+            let minArea = Infinity;
+            let bestRotation = 0;
+            let bestWidth = 0, bestDepth = 0;
+            let bestCenterU = 0, bestCenterV = 0;
+
+            for (let i = 0; i < mercPoints.length - 1; i++) {
+                const dx = mercPoints[i + 1].x - mercPoints[i].x;
+                const dy = mercPoints[i + 1].y - mercPoints[i].y;
+                if (dx === 0 && dy === 0) continue;
+
+                const rotation = Math.atan2(dy, dx);
+                const cos = Math.cos(-rotation);
+                const sin = Math.sin(-rotation);
+
+                let minU = Infinity, maxU = -Infinity, minV = Infinity, maxV = -Infinity;
+
+                for (const p of mercPoints) {
+                    const u = p.x * cos - p.y * sin;
+                    const v = p.x * sin + p.y * cos;
+                    if (u < minU) minU = u;
+                    if (u > maxU) maxU = u;
+                    if (v < minV) minV = v;
+                    if (v > maxV) maxV = v;
+                }
+
+                const area = (maxU - minU) * (maxV - minV);
+                if (area < minArea) {
+                    minArea = area;
+                    bestRotation = rotation;
+                    bestWidth = maxU - minU;
+                    bestDepth = maxV - minV;
+                    bestCenterU = (minU + maxU) / 2;
+                    bestCenterV = (minV + maxV) / 2;
+                }
             }
 
-            if (hasCoords) {
-                const centerLng = (minLng + maxLng) / 2;
-                const centerLat = (minLat + maxLat) / 2;
+            if (minArea === Infinity) return;
 
-                const centerLngLat = new mapboxgl.LngLat(centerLng, centerLat);
-                const edgeLngLat = new mapboxgl.LngLat(centerLng, maxLat);
-                const radiusMeters = centerLngLat.distanceTo(edgeLngLat);
+            const mercCenterX = bestCenterU * Math.cos(bestRotation) - bestCenterV * Math.sin(bestRotation);
+            const mercCenterY = bestCenterU * Math.sin(bestRotation) + bestCenterV * Math.cos(bestRotation);
 
-                const merc = mapboxgl.MercatorCoordinate.fromLngLat([centerLng, centerLat], 0);
+            const widthMeters = bestWidth / this.unitsPerMeter;
+            const depthMeters = bestDepth / this.unitsPerMeter;
+            const localX = (mercCenterX - this.centerMercator.x) / this.unitsPerMeter;
+            const localY = -(mercCenterY - this.centerMercator.y) / this.unitsPerMeter;
 
-                const localX = (merc.x - this.centerMercator.x) / this.unitsPerMeter;
-                const localY = -(merc.y - this.centerMercator.y) / this.unitsPerMeter;
+            newObstacles.push({
+                position: new THREE.Vector3(localX, localY, 0),
+                width: widthMeters,
+                depth: depthMeters,
+                height: height,
+                rotation: -bestRotation
+            });
 
-                newObstacles.push({
-                    position: new THREE.Vector3(localX, localY, 0),
-                    radius: radiusMeters,
-                    height: height
-                });
+            const boxGeo = new THREE.BoxGeometry(bestWidth, height * this.unitsPerMeter, bestDepth);
+            const boxMesh = new THREE.Mesh(boxGeo, debugMat);
 
-                const cylGeo = new THREE.CylinderGeometry(
-                    radiusMeters * this.unitsPerMeter,
-                    radiusMeters * this.unitsPerMeter,
-                    height * this.unitsPerMeter,
-                    16
-                );
-                const cylMesh = new THREE.Mesh(cylGeo, debugMat);
+            boxMesh.rotation.x = Math.PI / 2;
 
-                const localXMercator = (merc.x - this.centerMercator.x);
-                const localYMercator = (merc.y - this.centerMercator.y);
+            const group = new THREE.Group();
+            group.position.set(
+                mercCenterX - this.centerMercator.x,
+                mercCenterY - this.centerMercator.y,
+                (height / 2 + groundElevation) * this.unitsPerMeter
+            );
+            group.rotation.z = bestRotation;
+            group.add(boxMesh);
 
-                cylMesh.position.set(localXMercator, localYMercator, (height / 2 + groundElevation) * this.unitsPerMeter);
-
-                cylMesh.rotation.x = Math.PI / 2;
-                this.debugObstacles.add(cylMesh);
-            }
+            this.debugObstacles.add(group);
         });
 
         this.swarmController.updateObstacles(newObstacles);
@@ -272,7 +300,6 @@ class DroneLayer implements mapboxgl.CustomLayerInterface {
         }
 
         this.swarmController.update(deltaTime);
-
 
         const mapboxMatrix = new THREE.Matrix4().fromArray(matrix);
         const translationMatrix = new THREE.Matrix4().makeTranslation(

@@ -9,8 +9,10 @@ export interface DroneState {
 
 export interface Obstacle {
     position: THREE.Vector3;
-    radius: number;
+    width: number;
+    depth: number;
     height: number;
+    rotation: number;
 }
 
 export class SwarmController {
@@ -88,20 +90,44 @@ export class SwarmController {
     private calculateObstacleAvoidance(drone: DroneState): THREE.Vector3 {
         const steer = new THREE.Vector3();
         let count = 0;
+        const padding = 2.0;
 
         for (const obs of this.obstacles) {
-            if (drone.position.z > obs.height + 2.0) continue;
+            if (drone.position.z > obs.height + padding) continue;
 
-            const dist2D = new THREE.Vector2(drone.position.x, drone.position.y)
-                .distanceTo(new THREE.Vector2(obs.position.x, obs.position.y));
+            const relX = drone.position.x - obs.position.x;
+            const relY = drone.position.y - obs.position.y;
 
-            const safeRadius = obs.radius + 2.0;
+            const cos = Math.cos(-obs.rotation);
+            const sin = Math.sin(-obs.rotation);
+            const localX = relX * cos - relY * sin;
+            const localY = relX * sin + relY * cos;
 
-            if (dist2D > 0 && dist2D < safeRadius) {
-                const diff = new THREE.Vector3(drone.position.x - obs.position.x, drone.position.y - obs.position.y, 0);
+            const halfW = obs.width / 2;
+            const halfD = obs.depth / 2;
+            const closestX = Math.max(-halfW, Math.min(localX, halfW));
+            const closestY = Math.max(-halfD, Math.min(localY, halfD));
 
-                const urgency = 1.0 - (dist2D / safeRadius);
-                diff.normalize().multiplyScalar(urgency);
+            const dist = Math.sqrt((localX - closestX) ** 2 + (localY - closestY) ** 2);
+
+            if (dist < padding) {
+                let localPushX, localPushY;
+
+                if (dist === 0) {
+                    localPushX = localX;
+                    localPushY = localY;
+                } else {
+                    localPushX = localX - closestX;
+                    localPushY = localY - closestY;
+                }
+
+                const worldCos = Math.cos(obs.rotation);
+                const worldSin = Math.sin(obs.rotation);
+                const pushX = localPushX * worldCos - localPushY * worldSin;
+                const pushY = localPushX * worldSin + localPushY * worldCos;
+
+                const urgency = 1.0 - (dist / padding);
+                const diff = new THREE.Vector3(pushX, pushY, 0).normalize().multiplyScalar(urgency);
 
                 steer.add(diff);
                 count++;
@@ -109,10 +135,7 @@ export class SwarmController {
         }
 
         if (count > 0) {
-            steer.divideScalar(count);
-            steer.normalize().multiplyScalar(this.maxSpeed);
-            steer.sub(drone.velocity);
-
+            steer.divideScalar(count).normalize().multiplyScalar(this.maxSpeed).sub(drone.velocity);
             steer.clampLength(0, this.maxForce * 10.0);
         }
         return steer;
