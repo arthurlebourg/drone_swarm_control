@@ -1,9 +1,12 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useRef } from 'react';
 import { useDroneStore } from '../hooks/useDroneStore';
 import { swarmData } from './DroneLayer';
 
 const DroneSidebar: React.FC = () => {
     const { selectedDrones } = useDroneStore();
+
+    const latRefs = useRef<{ [key: number]: HTMLSpanElement | null }>({});
+    const lngRefs = useRef<{ [key: number]: HTMLSpanElement | null }>({});
 
     useEffect(() => {
         if (selectedDrones.length === 0) return;
@@ -13,8 +16,8 @@ const DroneSidebar: React.FC = () => {
         const updateCoordinates = () => {
             selectedDrones.forEach((index) => {
                 const drone = swarmData[index];
-                const latEl = document.getElementById(`drone-lat-${index}`);
-                const lngEl = document.getElementById(`drone-lng-${index}`);
+                const latEl = latRefs.current[index];
+                const lngEl = lngRefs.current[index];
 
                 if (latEl && lngEl) {
                     latEl.innerText = `Lat: ${drone.lat.toFixed(6)}`;
@@ -72,8 +75,8 @@ const DroneSidebar: React.FC = () => {
                                 Drone #{index}
                             </div>
                             <div style={{ fontSize: '0.9em', color: '#ccc', fontFamily: 'monospace' }}>
-                                <span id={`drone-lat-${index}`}>Lat: 0.000000</span><br />
-                                <span id={`drone-lng-${index}`}>Lng: 0.000000</span>
+                                <span ref={el => { latRefs.current[index] = el }}>Lat: 0.000000</span><br />
+                                <span ref={el => { lngRefs.current[index] = el }}>Lng: 0.000000</span>
                             </div>
                         </li>
                     );
