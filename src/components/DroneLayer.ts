@@ -1,20 +1,38 @@
 import * as THREE from 'three';
 import mapboxgl from 'mapbox-gl';
-// Import plus standard pour Vite
-import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 
 const SWARM_SIZE = 50;
-const MUNICH_CENTER: [number, number] = [11.5820, 48.1351];
+const MUNICH_CENTER: [number, number] = [11.5827, 48.1350];
+
+const MIN_DRONE_REAL_SIZE_METERS = 0.5;
+const MAX_DRONE_REAL_SIZE_METERS = 1.0;
 
 const generateSwarmData = () => {
     return Array.from({ length: SWARM_SIZE }).map(() => ({
-        lng: MUNICH_CENTER[0] + (Math.random() - 0.5) * 0.03,
-        lat: MUNICH_CENTER[1] + (Math.random() - 0.5) * 0.03,
-        // Munich est à 520m d'altitude, on les place donc plus haut !
-        alt: 600 + Math.random() * 200,
+        lng: MUNICH_CENTER[0] + (Math.random() - 0.5) * 0.0003,
+        lat: MUNICH_CENTER[1] + (Math.random() - 0.5) * 0.0003,
+        relativeHeight: 5,
+        realSizeMeters: MIN_DRONE_REAL_SIZE_METERS + Math.random() * (MAX_DRONE_REAL_SIZE_METERS - MIN_DRONE_REAL_SIZE_METERS),
         rotationZ: Math.random() * Math.PI * 2,
-        spinSpeed: 0.02 + Math.random() * 0.05
+        spinSpeed: 0
     }));
+};
+
+export const swarmData = generateSwarmData();
+
+export const getSwarmBarycenter = (): [number, number] => {
+    const sumLng = swarmData.reduce((acc, drone) => acc + drone.lng, 0);
+    const sumLat = swarmData.reduce((acc, drone) => acc + drone.lat, 0);
+    return [sumLng / SWARM_SIZE, sumLat / SWARM_SIZE];
+};
+
+export const getSwarmBounds = (): mapboxgl.LngLatBoundsLike => {
+    const lngs = swarmData.map(d => d.lng);
+    const lats = swarmData.map(d => d.lat);
+    return [
+        [Math.min(...lngs), Math.min(...lats)],
+        [Math.max(...lngs), Math.max(...lats)]
+    ];
 };
 
 class DroneLayer implements mapboxgl.CustomLayerInterface {
@@ -29,7 +47,10 @@ class DroneLayer implements mapboxgl.CustomLayerInterface {
 
     instancedMesh!: THREE.InstancedMesh;
     dummy: THREE.Object3D;
-    swarmData = generateSwarmData();
+    swarmData = swarmData;
+
+    // NOUVEAU : On stocke le centre de la scène en coordonnées Mercator
+    centerMercator!: mapboxgl.MercatorCoordinate;
 
     constructor() {
         this.camera = new THREE.Camera();
@@ -43,38 +64,27 @@ class DroneLayer implements mapboxgl.CustomLayerInterface {
         const ambientLight = new THREE.AmbientLight(0x404040, 3);
         this.scene.add(ambientLight);
 
+        // NOUVEAU : On calcule le centre Mercator de l'essaim dès le départ
+        const [centerLng, centerLat] = getSwarmBarycenter();
+        this.centerMercator = mapboxgl.MercatorCoordinate.fromLngLat([centerLng, centerLat], 0);
+
         this.createInstancedSwarm();
     }
 
     private createInstancedSwarm() {
-        const geometries: THREE.BufferGeometry[] = [];
-
-        const bodyGeometry = new THREE.BoxGeometry(1, 1, 0.2);
-        geometries.push(bodyGeometry);
-
-        const rotorPositions = [
-            [0.4, 0.4, 0.1], [-0.4, 0.4, 0.1],
-            [0.4, -0.4, 0.1], [-0.4, -0.4, 0.1],
-        ];
-
-        rotorPositions.forEach(pos => {
-            const rotorGeometry = new THREE.CylinderGeometry(0.3, 0.3, 0.05, 16);
-            rotorGeometry.rotateX(Math.PI / 2);
-            rotorGeometry.translate(pos[0], pos[1], pos[2]);
-            geometries.push(rotorGeometry);
-        });
-
-        const mergedGeometry = mergeGeometries(geometries);
-        // ON A SUPPRIMÉ LE .scale(15, 15, 15) ICI !
+        const simpleBoxGeometry = new THREE.BoxGeometry(1, 1, 1);
 
         const material = new THREE.MeshStandardMaterial({
-            color: 0x4444ff,
+            color: 0x00ffff,
             metalness: 0.5,
-            roughness: 0.2
+            roughness: 0.2,
+            side: THREE.BackSide
         });
 
-        this.instancedMesh = new THREE.InstancedMesh(mergedGeometry, material, SWARM_SIZE);
+        this.instancedMesh = new THREE.InstancedMesh(simpleBoxGeometry, material, SWARM_SIZE);
         this.instancedMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+        this.instancedMesh.frustumCulled = false;
+
         this.scene.add(this.instancedMesh);
     }
 
@@ -91,23 +101,42 @@ class DroneLayer implements mapboxgl.CustomLayerInterface {
     render(gl: WebGLRenderingContext, matrix: number[]) {
         if (!this.renderer || !this.map) return;
 
-        this.camera.projectionMatrix = new THREE.Matrix4().fromArray(matrix);
+        // --- LA MAGIE EST ICI ---
+        // 1. On récupère la matrice absolue de Mapbox
+        const mapboxMatrix = new THREE.Matrix4().fromArray(matrix);
+
+        // 2. On crée une matrice de translation basée sur notre centre (calculé en Float64)
+        const translationMatrix = new THREE.Matrix4().makeTranslation(
+            this.centerMercator.x,
+            this.centerMercator.y,
+            this.centerMercator.z || 0
+        );
+
+        // 3. On combine les deux. La caméra Three.js considère maintenant que (0,0,0) est au barycentre de l'essaim.
+        this.camera.projectionMatrix = mapboxMatrix.multiply(translationMatrix);
 
         this.swarmData.forEach((data, index) => {
-            data.rotationZ += data.spinSpeed;
+            const groundElevation = this.map!.queryTerrainElevation([data.lng, data.lat]) || 520;
+            const finalAltitude = groundElevation + data.relativeHeight;
 
-            const mercator = mapboxgl.MercatorCoordinate.fromLngLat(
+            // Coordonnées absolues du drone
+            const droneMercator = mapboxgl.MercatorCoordinate.fromLngLat(
                 [data.lng, data.lat],
-                data.alt
+                finalAltitude
             );
 
-            // LE SECRET EST ICI : Calculer la taille exacte en mètres pour Mapbox
-            const scale = mercator.meterInMercatorCoordinateUnits() * 15; // Un drone de 15m
+            // 4. POSITION LOCALE : On soustrait le centre au drone.
+            // Ce calcul est fait en JS (Float64), le résultat est un chiffre très petit et hyper précis.
+            const localX = droneMercator.x - this.centerMercator.x;
+            const localY = droneMercator.y - this.centerMercator.y;
+            const localZ = (droneMercator.z || 0) - (this.centerMercator.z || 0);
 
-            this.dummy.position.set(mercator.x, mercator.y, mercator.z || 0);
+            // On place le drone sur sa position locale
+            this.dummy.position.set(localX, localY, localZ);
             this.dummy.rotation.z = data.rotationZ;
 
-            // On applique l'échelle calculée
+            const unitsPerMeter = droneMercator.meterInMercatorCoordinateUnits();
+            const scale = unitsPerMeter;
             this.dummy.scale.set(scale, scale, scale);
 
             this.dummy.updateMatrix();

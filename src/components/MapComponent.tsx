@@ -1,7 +1,7 @@
 import React, { useRef, useEffect } from 'react';
 import mapboxgl from 'mapbox-gl';
 import 'mapbox-gl/dist/mapbox-gl.css';
-import DroneLayer from './DroneLayer';
+import DroneLayer, { getSwarmBarycenter, getSwarmBounds } from './DroneLayer';
 
 mapboxgl.accessToken = import.meta.env.VITE_MAPBOX_TOKEN;
 
@@ -12,11 +12,14 @@ const MapComponent: React.FC = () => {
     useEffect(() => {
         if (map.current || !mapContainer.current) return;
 
+        // 1. On récupère le barycentre exact de notre génération aléatoire
+        const initialCenter = getSwarmBarycenter();
+
         map.current = new mapboxgl.Map({
             container: mapContainer.current,
             style: 'mapbox://styles/mapbox/light-v11',
-            center: [11.5820, 48.1351],
-            zoom: 13.5,
+            center: initialCenter, // On centre sur le barycentre
+            zoom: 12, // Zoom temporaire, sera écrasé par fitBounds
             pitch: 65,
             bearing: 20,
             antialias: true
@@ -41,7 +44,7 @@ const MapComponent: React.FC = () => {
                 'type': 'fill-extrusion',
                 'minzoom': 15,
                 'paint': {
-                    'fill-extrusion-color': '#222', // Bâtiments foncés pour aller avec la carte
+                    'fill-extrusion-color': '#aaa',
                     'fill-extrusion-height': ['get', 'height'],
                     'fill-extrusion-base': ['get', 'min_height'],
                     'fill-extrusion-opacity': 0.8
@@ -50,6 +53,16 @@ const MapComponent: React.FC = () => {
 
             const customLayer = new DroneLayer();
             map.current.addLayer(customLayer);
+
+            // 2. LA MAGIE DE LA CAMÉRA : On ajuste le zoom et le cadre
+            const bounds = getSwarmBounds();
+            map.current.fitBounds(bounds, {
+                padding: { top: 100, bottom: 100, left: 100, right: 100 }, // Marge en pixels autour de l'essaim
+                pitch: 65, // On conserve l'effet 3D
+                bearing: 20,
+                maxZoom: 16, // Évite de trop zoomer si les drones sont très proches
+                duration: 2000 // Animation fluide de 2 secondes au démarrage (mets 0 pour instantané)
+            });
         });
 
         return () => {
@@ -58,9 +71,7 @@ const MapComponent: React.FC = () => {
         };
     }, []);
 
-    return (
-        <div ref={mapContainer} style={{ width: '100vw', height: '100vh', position: 'absolute', top: 0, left: 0 }} />
-    );
+    return <div ref={mapContainer} style={{ width: '100vw', height: '100vh', position: 'absolute', top: 0, left: 0 }} />;
 };
 
 export default MapComponent;
