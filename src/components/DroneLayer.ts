@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import mapboxgl from 'mapbox-gl';
 import { SwarmController, type Obstacle } from './SwarmController';
 
-const SWARM_SIZE = 50;
+const SWARM_SIZE = 500;
 const MUNICH_CENTER: [number, number] = [11.5827, 48.1350];
 
 const DRONE_REAL_SIZE_METERS = 1.0;
@@ -56,7 +56,6 @@ class DroneLayer implements mapboxgl.CustomLayerInterface {
 
     meshArm1!: THREE.InstancedMesh;
     meshArm2!: THREE.InstancedMesh;
-    meshProps!: THREE.InstancedMesh;
 
     swarmData = swarmData;
     centerMercator: mapboxgl.MercatorCoordinate;
@@ -67,22 +66,13 @@ class DroneLayer implements mapboxgl.CustomLayerInterface {
     debugObstacles: THREE.Group = new THREE.Group();
     lastScanTime: number = 0;
 
-    private _tempZAxis = new THREE.Vector3(0, 0, 1);
     private _tempQuaternion = new THREE.Quaternion();
 
     private _baseMatrix = new THREE.Matrix4();
-    private _propLocalMatrix = new THREE.Matrix4();
-    private _propWorldMatrix = new THREE.Matrix4();
     private _position = new THREE.Vector3();
     private _rotation = new THREE.Euler();
     private _scale = new THREE.Vector3();
 
-    private motorOffsets = [
-        new THREE.Vector3(0.6, 0.6, 0.1),
-        new THREE.Vector3(-0.6, 0.6, 0.1),
-        new THREE.Vector3(0.6, -0.6, 0.1),
-        new THREE.Vector3(-0.6, -0.6, 0.1)
-    ];
 
     constructor() {
         this.camera = new THREE.Camera();
@@ -107,23 +97,18 @@ class DroneLayer implements mapboxgl.CustomLayerInterface {
 
     private initInstancedMeshes() {
         const bodyMat = new THREE.MeshStandardMaterial({ color: 0xcccccc, roughness: 0.3, metalness: 0.8 });
-        const propMat = new THREE.MeshStandardMaterial({ color: 0x111111, roughness: 0.9 });
 
         const armGeo1 = new THREE.BoxGeometry(1.6, 0.2, 0.15);
         const armGeo2 = new THREE.BoxGeometry(0.2, 1.6, 0.15);
-        const propGeo = new THREE.BoxGeometry(0.8, 0.1, 0.02);
 
         this.meshArm1 = new THREE.InstancedMesh(armGeo1, bodyMat, SWARM_SIZE);
         this.meshArm2 = new THREE.InstancedMesh(armGeo2, bodyMat, SWARM_SIZE);
-        this.meshProps = new THREE.InstancedMesh(propGeo, propMat, SWARM_SIZE * 4);
 
         this.meshArm1.frustumCulled = false;
         this.meshArm2.frustumCulled = false;
-        this.meshProps.frustumCulled = false;
 
         this.meshArm1.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
         this.meshArm2.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-        this.meshProps.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
 
         const defaultColor = new THREE.Color(0x00ffff);
         for (let i = 0; i < SWARM_SIZE; i++) {
@@ -133,7 +118,6 @@ class DroneLayer implements mapboxgl.CustomLayerInterface {
 
         this.scene.add(this.meshArm1);
         this.scene.add(this.meshArm2);
-        this.scene.add(this.meshProps);
     }
 
     public scanBuildings(groundElevation: number) {
@@ -349,26 +333,10 @@ class DroneLayer implements mapboxgl.CustomLayerInterface {
 
             this.meshArm1.setMatrixAt(index, this._baseMatrix);
             this.meshArm2.setMatrixAt(index, this._baseMatrix);
-
-            const timeOffset = now / 1000.0;
-
-            this.motorOffsets.forEach((offset, mIdx) => {
-                const propIndex = index * 4 + mIdx;
-                const direction = (mIdx % 2 === 0) ? 1 : -1;
-                const propAngle = timeOffset * droneData.spinSpeed * direction;
-
-                this._tempQuaternion.setFromAxisAngle(this._tempZAxis, propAngle);
-
-                this._propLocalMatrix.compose(offset, this._tempQuaternion, this._scale);
-                this._propWorldMatrix.multiplyMatrices(this._baseMatrix, this._propLocalMatrix);
-
-                this.meshProps.setMatrixAt(propIndex, this._propWorldMatrix);
-            });
         });
 
         this.meshArm1.instanceMatrix.needsUpdate = true;
         this.meshArm2.instanceMatrix.needsUpdate = true;
-        this.meshProps.instanceMatrix.needsUpdate = true;
 
         this.renderer.resetState();
         this.renderer.render(this.scene, this.camera);
