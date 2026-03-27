@@ -67,6 +67,9 @@ class DroneLayer implements mapboxgl.CustomLayerInterface {
     debugObstacles: THREE.Group = new THREE.Group();
     lastScanTime: number = 0;
 
+    private _tempZAxis = new THREE.Vector3(0, 0, 1);
+    private _tempQuaternion = new THREE.Quaternion();
+
     private motorOffsets = [
         new THREE.Vector3(0.6, 0.6, 0.1),
         new THREE.Vector3(-0.6, 0.6, 0.1),
@@ -106,6 +109,10 @@ class DroneLayer implements mapboxgl.CustomLayerInterface {
         this.meshArm1 = new THREE.InstancedMesh(armGeo1, bodyMat, SWARM_SIZE);
         this.meshArm2 = new THREE.InstancedMesh(armGeo2, bodyMat, SWARM_SIZE);
         this.meshProps = new THREE.InstancedMesh(propGeo, propMat, SWARM_SIZE * 4);
+
+        this.meshArm1.frustumCulled = false;
+        this.meshArm2.frustumCulled = false;
+        this.meshProps.frustumCulled = false;
 
         this.meshArm1.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
         this.meshArm2.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
@@ -329,9 +336,8 @@ class DroneLayer implements mapboxgl.CustomLayerInterface {
                 const direction = (mIdx % 2 === 0) ? 1 : -1;
                 const propAngle = timeOffset * droneData.spinSpeed * direction;
 
-                const propRot = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), propAngle);
-
-                propLocalMatrix.compose(offset, propRot, new THREE.Vector3(1, 1, 1));
+                this._tempQuaternion.setFromAxisAngle(this._tempZAxis, propAngle);
+                propLocalMatrix.compose(offset, this._tempQuaternion, scale);
 
                 propWorldMatrix.multiplyMatrices(baseMatrix, propLocalMatrix);
 
@@ -342,10 +348,6 @@ class DroneLayer implements mapboxgl.CustomLayerInterface {
         this.meshArm1.instanceMatrix.needsUpdate = true;
         this.meshArm2.instanceMatrix.needsUpdate = true;
         this.meshProps.instanceMatrix.needsUpdate = true;
-
-        this.meshArm1.computeBoundingSphere();
-        this.meshArm2.computeBoundingSphere();
-        this.meshProps.computeBoundingSphere();
 
         this.renderer.resetState();
         this.renderer.render(this.scene, this.camera);
