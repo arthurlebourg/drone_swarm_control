@@ -4,15 +4,14 @@ import mapboxgl from 'mapbox-gl';
 const SWARM_SIZE = 50;
 const MUNICH_CENTER: [number, number] = [11.5827, 48.1350];
 
-const MIN_DRONE_REAL_SIZE_METERS = 0.5;
-const MAX_DRONE_REAL_SIZE_METERS = 1.0;
+const DRONE_REAL_SIZE_METERS = 0.5;
 
 const generateSwarmData = () => {
     return Array.from({ length: SWARM_SIZE }).map(() => ({
         lng: MUNICH_CENTER[0] + (Math.random() - 0.5) * 0.0003,
         lat: MUNICH_CENTER[1] + (Math.random() - 0.5) * 0.0003,
         relativeHeight: 5,
-        realSizeMeters: MIN_DRONE_REAL_SIZE_METERS + Math.random() * (MAX_DRONE_REAL_SIZE_METERS - MIN_DRONE_REAL_SIZE_METERS),
+        realSizeMeters: DRONE_REAL_SIZE_METERS,
         rotationZ: Math.random() * Math.PI * 2,
         spinSpeed: 0
     }));
@@ -45,12 +44,11 @@ class DroneLayer implements mapboxgl.CustomLayerInterface {
     renderer: THREE.WebGLRenderer | null = null;
     map: mapboxgl.Map | null = null;
 
-    instancedMesh!: THREE.InstancedMesh;
+    instancedMesh: THREE.InstancedMesh;
     dummy: THREE.Object3D;
     swarmData = swarmData;
 
-    // NOUVEAU : On stocke le centre de la scène en coordonnées Mercator
-    centerMercator!: mapboxgl.MercatorCoordinate;
+    centerMercator: mapboxgl.MercatorCoordinate;
 
     constructor() {
         this.camera = new THREE.Camera();
@@ -64,28 +62,48 @@ class DroneLayer implements mapboxgl.CustomLayerInterface {
         const ambientLight = new THREE.AmbientLight(0x404040, 3);
         this.scene.add(ambientLight);
 
-        // NOUVEAU : On calcule le centre Mercator de l'essaim dès le départ
         const [centerLng, centerLat] = getSwarmBarycenter();
         this.centerMercator = mapboxgl.MercatorCoordinate.fromLngLat([centerLng, centerLat], 0);
 
-        this.createInstancedSwarm();
+        this.instancedMesh = this.createInstancedSwarm();
     }
 
     private createInstancedSwarm() {
         const simpleBoxGeometry = new THREE.BoxGeometry(1, 1, 1);
 
         const material = new THREE.MeshStandardMaterial({
-            color: 0x00ffff,
+            color: 0xffffff,
             metalness: 0.5,
             roughness: 0.2,
             side: THREE.BackSide
         });
 
-        this.instancedMesh = new THREE.InstancedMesh(simpleBoxGeometry, material, SWARM_SIZE);
-        this.instancedMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-        this.instancedMesh.frustumCulled = false;
+        const instancedMesh = new THREE.InstancedMesh(simpleBoxGeometry, material, SWARM_SIZE);
+        instancedMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+        instancedMesh.frustumCulled = false;
 
-        this.scene.add(this.instancedMesh);
+        const defaultColor = new THREE.Color(0x00ffff);
+        for (let i = 0; i < SWARM_SIZE; i++) {
+            instancedMesh.setColorAt(i, defaultColor);
+        }
+        instancedMesh.instanceColor!.needsUpdate = true;
+
+        this.scene.add(instancedMesh);
+        return instancedMesh
+    }
+
+    public highlightDrones(selectedIndices: number[]) {
+        const defaultColor = new THREE.Color(0x00ffff); // Cyan
+        const highlightColor = new THREE.Color(0xff00ff); // Magenta pour la sélection
+
+        for (let i = 0; i < SWARM_SIZE; i++) {
+            const isSelected = selectedIndices.includes(i);
+            this.instancedMesh.setColorAt(i, isSelected ? highlightColor : defaultColor);
+        }
+
+        // On prévient Three.js de mettre à jour la carte graphique
+        this.instancedMesh.instanceColor!.needsUpdate = true;
+        this.map?.triggerRepaint();
     }
 
     onAdd(map: mapboxgl.Map, gl: WebGLRenderingContext) {
@@ -133,7 +151,6 @@ class DroneLayer implements mapboxgl.CustomLayerInterface {
 
             // On place le drone sur sa position locale
             this.dummy.position.set(localX, localY, localZ);
-            this.dummy.rotation.z = data.rotationZ;
 
             const unitsPerMeter = droneMercator.meterInMercatorCoordinateUnits();
             const scale = unitsPerMeter;
@@ -147,7 +164,6 @@ class DroneLayer implements mapboxgl.CustomLayerInterface {
 
         this.renderer.resetState();
         this.renderer.render(this.scene, this.camera);
-        this.map.triggerRepaint();
     }
 }
 
