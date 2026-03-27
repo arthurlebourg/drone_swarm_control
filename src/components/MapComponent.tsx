@@ -7,10 +7,12 @@ import DroneSidebar from './DroneSidebar';
 
 mapboxgl.accessToken = import.meta.env.VITE_MAPBOX_TOKEN;
 
+
 const MapComponent: React.FC = () => {
     const mapContainer = useRef<HTMLDivElement>(null);
     const map = useRef<mapboxgl.Map | null>(null);
     const droneLayerRef = useRef<DroneLayer | null>(null);
+    const targetMarkerRef = useRef<mapboxgl.Marker | null>(null);
 
     const { selectedDrones, setSelectedDrones, clearSelection } = useDroneStore();
 
@@ -79,8 +81,40 @@ const MapComponent: React.FC = () => {
     }, []);
 
     useEffect(() => {
-        if (droneLayerRef.current) {
-            droneLayerRef.current.highlightDrones(selectedDrones);
+        if (!droneLayerRef.current || !map.current) return;
+
+        droneLayerRef.current.updateSelection(selectedDrones);
+
+        if (selectedDrones.length > 0) {
+            let sumLng = 0, sumLat = 0;
+            selectedDrones.forEach(i => {
+                sumLng += swarmData[i].lng;
+                sumLat += swarmData[i].lat;
+            });
+            const centerLng = sumLng / selectedDrones.length;
+            const centerLat = sumLat / selectedDrones.length;
+
+            if (!targetMarkerRef.current) {
+                targetMarkerRef.current = new mapboxgl.Marker({ color: '#ff00ff', draggable: true })
+                    .setLngLat([centerLng, centerLat])
+                    .addTo(map.current);
+
+                targetMarkerRef.current.on('drag', () => {
+                    const lngLat = targetMarkerRef.current!.getLngLat();
+                    droneLayerRef.current!.setTargetGPS(lngLat.lng, lngLat.lat);
+                });
+            } else {
+                targetMarkerRef.current.setLngLat([centerLng, centerLat]);
+            }
+
+            droneLayerRef.current.setTargetGPS(centerLng, centerLat);
+
+        } else {
+            if (targetMarkerRef.current) {
+                targetMarkerRef.current.remove();
+                targetMarkerRef.current = null;
+            }
+            droneLayerRef.current.swarmController.target = null;
         }
     }, [selectedDrones]);
 

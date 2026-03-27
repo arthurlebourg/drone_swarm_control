@@ -1,12 +1,22 @@
 import * as THREE from 'three';
 import mapboxgl from 'mapbox-gl';
+import { SwarmController } from './SwarmController';
 
 const SWARM_SIZE = 50;
 const MUNICH_CENTER: [number, number] = [11.5827, 48.1350];
 
 const DRONE_REAL_SIZE_METERS = 0.5;
 
-const generateSwarmData = () => {
+export interface SwarmData {
+    lng: number;
+    lat: number;
+    relativeHeight: number;
+    realSizeMeters: number;
+    rotationZ: number;
+    spinSpeed: number;
+}
+
+const generateSwarmData = (): SwarmData[] => {
     return Array.from({ length: SWARM_SIZE }).map(() => ({
         lng: MUNICH_CENTER[0] + (Math.random() - 0.5) * 0.0003,
         lat: MUNICH_CENTER[1] + (Math.random() - 0.5) * 0.0003,
@@ -49,6 +59,9 @@ class DroneLayer implements mapboxgl.CustomLayerInterface {
     swarmData = swarmData;
 
     centerMercator: mapboxgl.MercatorCoordinate;
+    public swarmController: SwarmController;
+    private unitsPerMeter: number;
+    private lastTime: number = performance.now();
 
     constructor() {
         this.camera = new THREE.Camera();
@@ -64,8 +77,23 @@ class DroneLayer implements mapboxgl.CustomLayerInterface {
 
         const [centerLng, centerLat] = getSwarmBarycenter();
         this.centerMercator = mapboxgl.MercatorCoordinate.fromLngLat([centerLng, centerLat], 0);
+        this.unitsPerMeter = this.centerMercator.meterInMercatorCoordinateUnits();
+
+        this.swarmController = new SwarmController(swarmData, centerLng, centerLat);
 
         this.instancedMesh = this.createInstancedSwarm();
+    }
+
+    public setTargetGPS(lng: number, lat: number) {
+        const targetMercator = mapboxgl.MercatorCoordinate.fromLngLat([lng, lat], 0);
+        const localX = (targetMercator.x - this.centerMercator.x) / this.unitsPerMeter;
+        const localY = -(targetMercator.y - this.centerMercator.y) / this.unitsPerMeter;
+        this.swarmController.setTarget(localX, localY, 50);
+    }
+
+    public updateSelection(indices: number[]) {
+        this.swarmController.updateSelection(indices);
+        this.highlightDrones(indices);
     }
 
     private createInstancedSwarm() {
@@ -138,33 +166,34 @@ class DroneLayer implements mapboxgl.CustomLayerInterface {
     render(_gl: WebGLRenderingContext, matrix: number[]) {
         if (!this.renderer || !this.map) return;
 
-        const mapboxMatrix = new THREE.Matrix4().fromArray(matrix);
+        const now = performance.now();
+        let deltaTime = (now - this.lastTime) / 1000.0;
+        this.lastTime = now;
+        if (deltaTime > 0.1) deltaTime = 0.1;
 
+        this.swarmController.update(deltaTime);
+
+        const mapboxMatrix = new THREE.Matrix4().fromArray(matrix);
         const translationMatrix = new THREE.Matrix4().makeTranslation(
             this.centerMercator.x,
             this.centerMercator.y,
             this.centerMercator.z || 0
         );
-
         this.camera.projectionMatrix = mapboxMatrix.multiply(translationMatrix);
+        const centerLngLat = this.centerMercator.toLngLat();
+        const groundElevation = this.map.queryTerrainElevation([centerLngLat.lng, centerLngLat.lat]) || 520;
+        this.swarmController.drones.forEach((drone, index) => {
+            const localXMercator = drone.position.x * this.unitsPerMeter;
+            const localYMercator = -drone.position.y * this.unitsPerMeter;
+            const localZMercator = (drone.position.z + groundElevation) * this.unitsPerMeter;
 
-        this.swarmData.forEach((data, index) => {
-            const groundElevation = this.map!.queryTerrainElevation([data.lng, data.lat]) || 520;
-            const finalAltitude = groundElevation + data.relativeHeight;
+            this.dummy.position.set(localXMercator, localYMercator, localZMercator);
 
-            const droneMercator = mapboxgl.MercatorCoordinate.fromLngLat(
-                [data.lng, data.lat],
-                finalAltitude
-            );
+            if (drone.velocity.lengthSq() > 0.1) {
+                this.dummy.rotation.z = Math.atan2(drone.velocity.y, drone.velocity.x);
+            }
 
-            const localX = droneMercator.x - this.centerMercator.x;
-            const localY = droneMercator.y - this.centerMercator.y;
-            const localZ = (droneMercator.z || 0) - (this.centerMercator.z || 0);
-
-            this.dummy.position.set(localX, localY, localZ);
-
-            const unitsPerMeter = droneMercator.meterInMercatorCoordinateUnits();
-            const scale = unitsPerMeter;
+            const scale = this.unitsPerMeter * drone.realSizeMeters;
             this.dummy.scale.set(scale, scale, scale);
 
             this.dummy.updateMatrix();
@@ -175,6 +204,8 @@ class DroneLayer implements mapboxgl.CustomLayerInterface {
 
         this.renderer.resetState();
         this.renderer.render(this.scene, this.camera);
+
+        this.map.triggerRepaint();
     }
 }
 
