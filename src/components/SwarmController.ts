@@ -7,10 +7,17 @@ export interface DroneState {
     realSizeMeters: number;
 }
 
+export interface Obstacle {
+    position: THREE.Vector3;
+    radius: number;
+    height: number;
+}
+
 export class SwarmController {
     drones: DroneState[] = [];
     target: THREE.Vector3 | null = null;
     selectedIndices: Set<number> = new Set();
+    obstacles: Obstacle[] = [];
 
     maxSpeed = 15.0;
     maxForce = 20.0;
@@ -42,6 +49,10 @@ export class SwarmController {
         this.selectedIndices = new Set(indices);
     }
 
+    updateObstacles(newObstacles: Obstacle[]) {
+        this.obstacles = newObstacles;
+    }
+
     update(deltaTime: number) {
         for (let i = 0; i < this.drones.length; i++) {
             const drone = this.drones[i];
@@ -58,8 +69,12 @@ export class SwarmController {
                 drone.velocity.multiplyScalar(0.95);
             }
 
+            const avoidance = this.calculateObstacleAvoidance(drone);
+            avoidance.multiplyScalar(5.0);
+
             drone.velocity.add(separation.multiplyScalar(deltaTime));
             drone.velocity.add(attraction.multiplyScalar(deltaTime));
+            drone.velocity.add(avoidance.multiplyScalar(deltaTime));
 
             drone.velocity.z = 0;
 
@@ -68,6 +83,39 @@ export class SwarmController {
             const moveStep = drone.velocity.clone().multiplyScalar(deltaTime);
             drone.position.add(moveStep);
         }
+    }
+
+    private calculateObstacleAvoidance(drone: DroneState): THREE.Vector3 {
+        const steer = new THREE.Vector3();
+        let count = 0;
+
+        for (const obs of this.obstacles) {
+            if (drone.position.z > obs.height + 2.0) continue;
+
+            const dist2D = new THREE.Vector2(drone.position.x, drone.position.y)
+                .distanceTo(new THREE.Vector2(obs.position.x, obs.position.y));
+
+            const safeRadius = obs.radius + 2.0;
+
+            if (dist2D > 0 && dist2D < safeRadius) {
+                const diff = new THREE.Vector3(drone.position.x - obs.position.x, drone.position.y - obs.position.y, 0);
+
+                const urgency = 1.0 - (dist2D / safeRadius);
+                diff.normalize().multiplyScalar(urgency);
+
+                steer.add(diff);
+                count++;
+            }
+        }
+
+        if (count > 0) {
+            steer.divideScalar(count);
+            steer.normalize().multiplyScalar(this.maxSpeed);
+            steer.sub(drone.velocity);
+
+            steer.clampLength(0, this.maxForce * 10.0);
+        }
+        return steer;
     }
 
     private calculateSeparation(drone: DroneState, index: number): THREE.Vector3 {

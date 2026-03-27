@@ -32,7 +32,7 @@ const MapComponent: React.FC = () => {
             pitch: 65,
             bearing: 20,
             antialias: true,
-            maxZoom: 22
+            maxZoom: 30
         });
 
         map.current.on('style.load', () => {
