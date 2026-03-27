@@ -7,10 +7,16 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
+# Node & Vite Build
 node_modules
 dist
 dist-ssr
 *.local
+
+# Rust & WebAssembly
+/swarm-wasm/target/
+/swarm-wasm/pkg/
+**/*.rs.bk
 
 # Editor directories and files
 .vscode/*

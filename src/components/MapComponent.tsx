@@ -152,7 +152,7 @@ const MapComponent: FC = () => {
                 targetMarkerRef.current.remove();
                 targetMarkerRef.current = null;
             }
-            droneLayerRef.current.swarmController.target = null;
+            droneLayerRef.current.clearTargetGPS();
         }
     }, [selectedDrones]);
 

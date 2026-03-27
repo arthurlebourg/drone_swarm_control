@@ -1,6 +1,5 @@
 import * as THREE from 'three';
 import mapboxgl from 'mapbox-gl';
-import { SwarmController, type Obstacle } from './SwarmController';
 
 const SWARM_SIZE = 500;
 const MUNICH_CENTER: [number, number] = [11.5827, 48.1350];
@@ -14,6 +13,14 @@ export interface SwarmData {
     realSizeMeters: number;
     rotationZ: number;
     spinSpeed: number;
+}
+
+export interface Obstacle {
+    position: THREE.Vector3;
+    width: number;
+    depth: number;
+    height: number;
+    rotation: number;
 }
 
 const generateSwarmData = (): SwarmData[] => {
@@ -59,7 +66,6 @@ class DroneLayer implements mapboxgl.CustomLayerInterface {
 
     swarmData = swarmData;
     centerMercator: mapboxgl.MercatorCoordinate;
-    public swarmController: SwarmController;
     private unitsPerMeter: number;
     private lastTime: number = performance.now();
 
@@ -70,9 +76,10 @@ class DroneLayer implements mapboxgl.CustomLayerInterface {
 
     private _baseMatrix = new THREE.Matrix4();
     private _position = new THREE.Vector3();
-    private _rotation = new THREE.Euler();
     private _scale = new THREE.Vector3();
 
+    private worker: Worker;
+    private latestPositions: Float32Array | null = null;
 
     constructor() {
         this.camera = new THREE.Camera();
@@ -90,9 +97,35 @@ class DroneLayer implements mapboxgl.CustomLayerInterface {
         this.centerMercator = mapboxgl.MercatorCoordinate.fromLngLat([centerLng, centerLat], 0);
         this.unitsPerMeter = this.centerMercator.meterInMercatorCoordinateUnits();
 
-        this.swarmController = new SwarmController(swarmData, centerLng, centerLat);
-
         this.initInstancedMeshes();
+        const url = new URL('../workers/swarm.worker.ts', import.meta.url)
+        this.worker = new Worker(url, { type: 'module' });
+        this.worker.onmessage = (e) => {
+            if (e.data.type === 'TICK') {
+                this.latestPositions = e.data.positions;
+                this.map?.triggerRepaint();
+            }
+        }; const bufferSize = SWARM_SIZE * 3 * 4;
+        const sharedBuffer = new SharedArrayBuffer(bufferSize);
+
+        this.latestPositions = new Float32Array(sharedBuffer);
+
+        this.worker = new Worker(url, { type: 'module' });
+        this.worker.onmessage = (e) => {
+            if (e.data.type === 'TICK') {
+                this.map?.triggerRepaint();
+            }
+        };
+
+        this.worker.postMessage({
+            type: 'INIT',
+            payload: {
+                numDrones: SWARM_SIZE,
+                centerX: this.centerMercator.x,
+                centerY: this.centerMercator.y,
+                sharedBuffer: sharedBuffer
+            }
+        });
     }
 
     private initInstancedMeshes() {
@@ -124,7 +157,7 @@ class DroneLayer implements mapboxgl.CustomLayerInterface {
         if (!this.map) return;
 
         const features = this.map.queryRenderedFeatures({ layers: ['add-3d-buildings'] });
-        const newObstacles: Obstacle[] = [];
+        const newObstacles: any[] = [];
         this.debugObstacles.clear();
 
         const debugMat = new THREE.MeshBasicMaterial({ color: 0xff0000, wireframe: true, transparent: true, opacity: 0.2 });
@@ -215,19 +248,33 @@ class DroneLayer implements mapboxgl.CustomLayerInterface {
             this.debugObstacles.add(group);
         });
 
-        this.swarmController.updateObstacles(newObstacles);
+        const flatObstacles = new Float32Array(newObstacles.length * 6);
+        newObstacles.forEach((obs, i) => {
+            const offset = i * 6;
+            flatObstacles[offset] = obs.position.x;
+            flatObstacles[offset + 1] = obs.position.y;
+            flatObstacles[offset + 2] = obs.height;
+            flatObstacles[offset + 3] = obs.width;
+            flatObstacles[offset + 4] = obs.depth;
+            flatObstacles[offset + 5] = obs.rotation;
+        });
+
+        this.worker.postMessage({ type: 'UPDATE_OBSTACLES', payload: flatObstacles });
+
     }
 
     public setTargetGPS(lng: number, lat: number) {
         const targetMercator = mapboxgl.MercatorCoordinate.fromLngLat([lng, lat], 0);
         const localX = (targetMercator.x - this.centerMercator.x) / this.unitsPerMeter;
         const localY = -(targetMercator.y - this.centerMercator.y) / this.unitsPerMeter;
-        this.swarmController.setTarget(localX, localY, 50);
+        this.worker.postMessage({ type: 'SET_TARGET', payload: { x: localX, y: localY, z: 50 } });
     }
 
     public updateSelection(indices: number[]) {
-        this.swarmController.updateSelection(indices);
         this.highlightDrones(indices);
+
+        const selectedArray = new Uint32Array(indices);
+        this.worker.postMessage({ type: 'UPDATE_SELECTION', payload: selectedArray });
     }
 
     public getDroneScreenPosition(index: number, screenWidth: number, screenHeight: number): { x: number, y: number } | null {
@@ -247,6 +294,10 @@ class DroneLayer implements mapboxgl.CustomLayerInterface {
             x: (ndcX + 1) / 2 * screenWidth,
             y: (1 - ndcY) / 2 * screenHeight
         };
+    }
+
+    public clearTargetGPS() {
+        this.worker.postMessage({ type: 'CLEAR_TARGET' });
     }
 
     public highlightDrones(selectedIndices: number[]) {
@@ -278,16 +329,6 @@ class DroneLayer implements mapboxgl.CustomLayerInterface {
     render(_gl: WebGLRenderingContext, matrix: number[]) {
         if (!this.renderer || !this.map) return;
 
-        const now = performance.now();
-        let deltaTime = (now - this.lastTime) / 1000.0;
-        this.lastTime = now;
-        if (deltaTime > 0.1) deltaTime = 0.1;
-
-        const centerLngLat = this.centerMercator.toLngLat();
-        const groundElevation = this.map.queryTerrainElevation([centerLngLat.lng, centerLngLat.lat]) || 520;
-
-        this.swarmController.update(deltaTime);
-
         const mapboxMatrix = new THREE.Matrix4().fromArray(matrix);
         const translationMatrix = new THREE.Matrix4().makeTranslation(
             this.centerMercator.x,
@@ -296,51 +337,46 @@ class DroneLayer implements mapboxgl.CustomLayerInterface {
         );
         this.camera.projectionMatrix = mapboxMatrix.multiply(translationMatrix);
 
-        this.swarmController.drones.forEach((drone, index) => {
-            const droneData = this.swarmData[index];
+        const now = performance.now();
+        const deltaTime = Math.min((now - this.lastTime) / 1000.0, 0.1);
+        this.lastTime = now;
 
-            const localXMercator = drone.position.x * this.unitsPerMeter;
-            const localYMercator = -drone.position.y * this.unitsPerMeter;
+        this.worker.postMessage({ type: 'UPDATE', payload: { deltaTime } });
 
-            const droneMercX = this.centerMercator.x + localXMercator;
-            const droneMercY = this.centerMercator.y - localYMercator;
-            const mercCoord = new mapboxgl.MercatorCoordinate(droneMercX, droneMercY, 0);
-            const lngLat = mercCoord.toLngLat();
+        if (!this.latestPositions) {
+            this.map.triggerRepaint();
+            return;
+        }
 
-            droneData.lng = lngLat.lng;
-            droneData.lat = lngLat.lat;
+        const centerLngLat = this.centerMercator.toLngLat();
+        const groundElevation = this.map.queryTerrainElevation([centerLngLat.lng, centerLngLat.lat]) || 520;
 
-            const targetZ = 5.0;
+        const s = this.unitsPerMeter * 1.0;
+        this._scale.set(s, s, s);
 
-            const climbRate = 2.0;
-            drone.position.z += (targetZ - drone.position.z) * (climbRate * deltaTime);
+        for (let i = 0; i < SWARM_SIZE; i++) {
+            const idx = i * 3;
+            const px = this.latestPositions[idx];
+            const py = this.latestPositions[idx + 1];
+            const pz = this.latestPositions[idx + 2];
 
-            const localZMercator = (drone.position.z + groundElevation) * this.unitsPerMeter;
+            const localXMercator = px * this.unitsPerMeter;
+            const localYMercator = -py * this.unitsPerMeter;
+            const localZMercator = (pz + groundElevation) * this.unitsPerMeter;
 
             this._position.set(localXMercator, localYMercator, localZMercator);
-
-            if (drone.velocity.lengthSq() > 0.1) {
-                this._rotation.set(0, 0, Math.atan2(drone.velocity.y, drone.velocity.x));
-            } else {
-                this._rotation.set(0, 0, 0);
-            }
-            this._tempQuaternion.setFromEuler(this._rotation);
-
-            const s = this.unitsPerMeter * drone.realSizeMeters;
-            this._scale.set(s, s, s);
-
+            this._tempQuaternion.setFromEuler(new THREE.Euler(0, 0, 0));
             this._baseMatrix.compose(this._position, this._tempQuaternion, this._scale);
 
-            this.meshArm1.setMatrixAt(index, this._baseMatrix);
-            this.meshArm2.setMatrixAt(index, this._baseMatrix);
-        });
+            this.meshArm1.setMatrixAt(i, this._baseMatrix);
+            this.meshArm2.setMatrixAt(i, this._baseMatrix);
+        }
 
         this.meshArm1.instanceMatrix.needsUpdate = true;
         this.meshArm2.instanceMatrix.needsUpdate = true;
 
         this.renderer.resetState();
         this.renderer.render(this.scene, this.camera);
-
         this.map.triggerRepaint();
     }
 }
