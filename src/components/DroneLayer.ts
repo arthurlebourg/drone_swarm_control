@@ -70,6 +70,13 @@ class DroneLayer implements mapboxgl.CustomLayerInterface {
     private _tempZAxis = new THREE.Vector3(0, 0, 1);
     private _tempQuaternion = new THREE.Quaternion();
 
+    private _baseMatrix = new THREE.Matrix4();
+    private _propLocalMatrix = new THREE.Matrix4();
+    private _propWorldMatrix = new THREE.Matrix4();
+    private _position = new THREE.Vector3();
+    private _rotation = new THREE.Euler();
+    private _scale = new THREE.Vector3();
+
     private motorOffsets = [
         new THREE.Vector3(0.6, 0.6, 0.1),
         new THREE.Vector3(-0.6, 0.6, 0.1),
@@ -129,7 +136,7 @@ class DroneLayer implements mapboxgl.CustomLayerInterface {
         this.scene.add(this.meshProps);
     }
 
-    private scanBuildings(groundElevation: number) {
+    public scanBuildings(groundElevation: number) {
         if (!this.map) return;
 
         const features = this.map.queryRenderedFeatures({ layers: ['add-3d-buildings'] });
@@ -294,10 +301,6 @@ class DroneLayer implements mapboxgl.CustomLayerInterface {
 
         const centerLngLat = this.centerMercator.toLngLat();
         const groundElevation = this.map.queryTerrainElevation([centerLngLat.lng, centerLngLat.lat]) || 520;
-        if (now - this.lastScanTime > 5000) {
-            this.scanBuildings(groundElevation);
-            this.lastScanTime = now;
-        }
 
         this.swarmController.update(deltaTime);
 
@@ -308,14 +311,6 @@ class DroneLayer implements mapboxgl.CustomLayerInterface {
             this.centerMercator.z || 0
         );
         this.camera.projectionMatrix = mapboxMatrix.multiply(translationMatrix);
-
-        const baseMatrix = new THREE.Matrix4();
-        const propLocalMatrix = new THREE.Matrix4();
-        const propWorldMatrix = new THREE.Matrix4();
-        const position = new THREE.Vector3();
-        const rotation = new THREE.Euler();
-        const quaternion = new THREE.Quaternion();
-        const scale = new THREE.Vector3();
 
         this.swarmController.drones.forEach((drone, index) => {
             const droneData = this.swarmData[index];
@@ -331,44 +326,43 @@ class DroneLayer implements mapboxgl.CustomLayerInterface {
             droneData.lng = lngLat.lng;
             droneData.lat = lngLat.lat;
 
-            const localElevation = this.map!.queryTerrainElevation([lngLat.lng, lngLat.lat]) || groundElevation;
-
-            const targetZ = (localElevation - groundElevation) + 5.0;
+            const targetZ = 5.0;
 
             const climbRate = 2.0;
             drone.position.z += (targetZ - drone.position.z) * (climbRate * deltaTime);
 
             const localZMercator = (drone.position.z + groundElevation) * this.unitsPerMeter;
 
-            position.set(localXMercator, localYMercator, localZMercator);
+            this._position.set(localXMercator, localYMercator, localZMercator);
 
             if (drone.velocity.lengthSq() > 0.1) {
-                rotation.set(0, 0, Math.atan2(drone.velocity.y, drone.velocity.x));
+                this._rotation.set(0, 0, Math.atan2(drone.velocity.y, drone.velocity.x));
+            } else {
+                this._rotation.set(0, 0, 0);
             }
-            quaternion.setFromEuler(rotation);
+            this._tempQuaternion.setFromEuler(this._rotation);
 
             const s = this.unitsPerMeter * drone.realSizeMeters;
-            scale.set(s, s, s);
+            this._scale.set(s, s, s);
 
-            baseMatrix.compose(position, quaternion, scale);
+            this._baseMatrix.compose(this._position, this._tempQuaternion, this._scale);
 
-            this.meshArm1.setMatrixAt(index, baseMatrix);
-            this.meshArm2.setMatrixAt(index, baseMatrix);
+            this.meshArm1.setMatrixAt(index, this._baseMatrix);
+            this.meshArm2.setMatrixAt(index, this._baseMatrix);
 
             const timeOffset = now / 1000.0;
 
             this.motorOffsets.forEach((offset, mIdx) => {
                 const propIndex = index * 4 + mIdx;
-
                 const direction = (mIdx % 2 === 0) ? 1 : -1;
                 const propAngle = timeOffset * droneData.spinSpeed * direction;
 
                 this._tempQuaternion.setFromAxisAngle(this._tempZAxis, propAngle);
-                propLocalMatrix.compose(offset, this._tempQuaternion, scale);
 
-                propWorldMatrix.multiplyMatrices(baseMatrix, propLocalMatrix);
+                this._propLocalMatrix.compose(offset, this._tempQuaternion, this._scale);
+                this._propWorldMatrix.multiplyMatrices(this._baseMatrix, this._propLocalMatrix);
 
-                this.meshProps.setMatrixAt(propIndex, propWorldMatrix);
+                this.meshProps.setMatrixAt(propIndex, this._propWorldMatrix);
             });
         });
 
