@@ -61,6 +61,8 @@ class DroneLayer implements mapboxgl.CustomLayerInterface {
     renderer: THREE.WebGLRenderer | null = null;
     map: mapboxgl.Map | null = null;
 
+    swarmGroup: THREE.Group;
+
     meshArm1!: THREE.InstancedMesh;
     meshArm2!: THREE.InstancedMesh;
 
@@ -84,7 +86,11 @@ class DroneLayer implements mapboxgl.CustomLayerInterface {
     constructor() {
         this.camera = new THREE.Camera();
         this.scene = new THREE.Scene();
-        this.scene.add(this.debugObstacles);
+
+        this.swarmGroup = new THREE.Group();
+        this.scene.add(this.swarmGroup);
+
+        this.swarmGroup.add(this.debugObstacles);
 
         const directionalLight = new THREE.DirectionalLight(0xffffff, 2);
         directionalLight.position.set(0, -70, 100).normalize();
@@ -98,6 +104,7 @@ class DroneLayer implements mapboxgl.CustomLayerInterface {
         this.unitsPerMeter = this.centerMercator.meterInMercatorCoordinateUnits();
 
         this.initInstancedMeshes();
+
         const url = new URL('../workers/swarm.worker.ts', import.meta.url)
         this.worker = new Worker(url, { type: 'module' });
         this.worker.onmessage = (e) => {
@@ -105,9 +112,9 @@ class DroneLayer implements mapboxgl.CustomLayerInterface {
                 this.latestPositions = e.data.positions;
                 this.map?.triggerRepaint();
             }
-        }; const bufferSize = SWARM_SIZE * 3 * 4;
+        };
+        const bufferSize = SWARM_SIZE * 3 * 4;
         const sharedBuffer = new SharedArrayBuffer(bufferSize);
-
         this.latestPositions = new Float32Array(sharedBuffer);
 
         this.worker = new Worker(url, { type: 'module' });
@@ -149,8 +156,8 @@ class DroneLayer implements mapboxgl.CustomLayerInterface {
             this.meshArm2.setColorAt(i, defaultColor);
         }
 
-        this.scene.add(this.meshArm1);
-        this.scene.add(this.meshArm2);
+        this.swarmGroup.add(this.meshArm1);
+        this.swarmGroup.add(this.meshArm2);
     }
 
     public scanBuildings(groundElevation: number) {
@@ -174,7 +181,6 @@ class DroneLayer implements mapboxgl.CustomLayerInterface {
             if (!rawCoords || rawCoords.length < 3) return;
 
             const height = f.properties.height || 10;
-
             const mercPoints = rawCoords.map((coord: any) => mapboxgl.MercatorCoordinate.fromLngLat(coord));
 
             let minArea = Infinity;
@@ -220,6 +226,7 @@ class DroneLayer implements mapboxgl.CustomLayerInterface {
 
             const widthMeters = bestWidth / this.unitsPerMeter;
             const depthMeters = bestDepth / this.unitsPerMeter;
+
             const localX = (mercCenterX - this.centerMercator.x) / this.unitsPerMeter;
             const localY = -(mercCenterY - this.centerMercator.y) / this.unitsPerMeter;
 
@@ -231,18 +238,17 @@ class DroneLayer implements mapboxgl.CustomLayerInterface {
                 rotation: -bestRotation
             });
 
-            const boxGeo = new THREE.BoxGeometry(bestWidth, height * this.unitsPerMeter, bestDepth);
+            const boxGeo = new THREE.BoxGeometry(widthMeters, height, depthMeters);
             const boxMesh = new THREE.Mesh(boxGeo, debugMat);
-
             boxMesh.rotation.x = Math.PI / 2;
 
             const group = new THREE.Group();
             group.position.set(
-                mercCenterX - this.centerMercator.x,
-                mercCenterY - this.centerMercator.y,
-                (height / 2 + groundElevation) * this.unitsPerMeter
+                localX,
+                localY,
+                (height / 2) + groundElevation
             );
-            group.rotation.z = bestRotation;
+            group.rotation.z = -bestRotation;
             group.add(boxMesh);
 
             this.debugObstacles.add(group);
@@ -260,7 +266,6 @@ class DroneLayer implements mapboxgl.CustomLayerInterface {
         });
 
         this.worker.postMessage({ type: 'UPDATE_OBSTACLES', payload: flatObstacles });
-
     }
 
     public setTargetGPS(lng: number, lat: number) {
@@ -330,12 +335,11 @@ class DroneLayer implements mapboxgl.CustomLayerInterface {
         if (!this.renderer || !this.map) return;
 
         const mapboxMatrix = new THREE.Matrix4().fromArray(matrix);
-        const translationMatrix = new THREE.Matrix4().makeTranslation(
-            this.centerMercator.x,
-            this.centerMercator.y,
-            this.centerMercator.z || 0
-        );
-        this.camera.projectionMatrix = mapboxMatrix.multiply(translationMatrix);
+        const transformMatrix = new THREE.Matrix4()
+            .makeTranslation(this.centerMercator.x, this.centerMercator.y, this.centerMercator.z || 0)
+            .scale(new THREE.Vector3(this.unitsPerMeter, -this.unitsPerMeter, this.unitsPerMeter));
+
+        this.camera.projectionMatrix = mapboxMatrix.multiply(transformMatrix);
 
         const now = performance.now();
         const deltaTime = Math.min((now - this.lastTime) / 1000.0, 0.1);
@@ -351,8 +355,7 @@ class DroneLayer implements mapboxgl.CustomLayerInterface {
         const centerLngLat = this.centerMercator.toLngLat();
         const groundElevation = this.map.queryTerrainElevation([centerLngLat.lng, centerLngLat.lat]) || 520;
 
-        const s = this.unitsPerMeter * 1.0;
-        this._scale.set(s, s, s);
+        this._scale.set(1, 1, 1);
 
         for (let i = 0; i < SWARM_SIZE; i++) {
             const idx = i * 3;
@@ -360,11 +363,7 @@ class DroneLayer implements mapboxgl.CustomLayerInterface {
             const py = this.latestPositions[idx + 1];
             const pz = this.latestPositions[idx + 2];
 
-            const localXMercator = px * this.unitsPerMeter;
-            const localYMercator = -py * this.unitsPerMeter;
-            const localZMercator = (pz + groundElevation) * this.unitsPerMeter;
-
-            this._position.set(localXMercator, localYMercator, localZMercator);
+            this._position.set(px, py, pz + groundElevation);
             this._tempQuaternion.setFromEuler(new THREE.Euler(0, 0, 0));
             this._baseMatrix.compose(this._position, this._tempQuaternion, this._scale);
 
@@ -374,6 +373,8 @@ class DroneLayer implements mapboxgl.CustomLayerInterface {
 
         this.meshArm1.instanceMatrix.needsUpdate = true;
         this.meshArm2.instanceMatrix.needsUpdate = true;
+
+        this.scene.updateMatrixWorld(true);
 
         this.renderer.resetState();
         this.renderer.render(this.scene, this.camera);

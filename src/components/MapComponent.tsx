@@ -4,7 +4,7 @@ import 'mapbox-gl/dist/mapbox-gl.css';
 import DroneLayer, { getSwarmBarycenter, getSwarmBounds, swarmData } from './DroneLayer';
 import { useDroneStore } from '../hooks/useDroneStore';
 import DroneSidebar from './DroneSidebar';
-import Stats from 'stats.js';
+import { useStats } from '../hooks/useStats';
 
 mapboxgl.accessToken = import.meta.env.VITE_MAPBOX_TOKEN;
 
@@ -19,35 +19,7 @@ const MapComponent: FC = () => {
     const [isSelectionMode, setIsSelectionMode] = useState(false);
     const [selectionBox, setSelectionBox] = useState<{ startX: number, startY: number, currentX: number, currentY: number } | null>(null);
 
-    useEffect(() => {
-        const stats = new Stats();
-        stats.showPanel(0); // 0: fps, 1: ms, 2: mb, 3+: custom
-
-        // Force the stats panel to sit on top of everything (like Mapbox and your UI)
-        stats.dom.style.position = 'absolute';
-        stats.dom.style.top = '0px';
-        stats.dom.style.right = '0px'; // Put it on the right so it doesn't block your buttons
-        stats.dom.style.left = 'auto';
-        stats.dom.style.zIndex = '9999';
-
-        document.body.appendChild(stats.dom);
-
-        // Run a basic requestAnimationFrame loop to track the browser's main thread framerate
-        let animationFrameId: number;
-        const animate = () => {
-            stats.update();
-            animationFrameId = requestAnimationFrame(animate);
-        };
-        animate();
-
-        // Clean up when the component unmounts
-        return () => {
-            cancelAnimationFrame(animationFrameId);
-            if (document.body.contains(stats.dom)) {
-                document.body.removeChild(stats.dom);
-            }
-        };
-    }, []);
+    useStats()
 
     useEffect(() => {
         if (map.current || !mapContainer.current) return;
