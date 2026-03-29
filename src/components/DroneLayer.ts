@@ -12,7 +12,6 @@ export interface SwarmData {
     relativeHeight: number;
     realSizeMeters: number;
     rotationZ: number;
-    spinSpeed: number;
 }
 
 export interface Obstacle {
@@ -30,7 +29,6 @@ const generateSwarmData = (): SwarmData[] => {
         relativeHeight: 5,
         realSizeMeters: DRONE_REAL_SIZE_METERS,
         rotationZ: Math.random() * Math.PI * 2,
-        spinSpeed: (Math.random() + 1.0) * 15.0
     }));
 };
 
@@ -72,7 +70,6 @@ class DroneLayer implements mapboxgl.CustomLayerInterface {
     private lastTime: number = performance.now();
 
     debugObstacles: THREE.Group = new THREE.Group();
-    lastScanTime: number = 0;
 
     private _tempQuaternion = new THREE.Quaternion();
 
@@ -160,6 +157,10 @@ class DroneLayer implements mapboxgl.CustomLayerInterface {
         this.swarmGroup.add(this.meshArm2);
     }
 
+    private _debugMat = new THREE.MeshBasicMaterial({ color: 0xff0000, wireframe: true, transparent: true, opacity: 0.2 });
+
+    private _seen = new Set();
+
     public scanBuildings(groundElevation: number) {
         if (!this.map) return;
 
@@ -167,15 +168,14 @@ class DroneLayer implements mapboxgl.CustomLayerInterface {
         const newObstacles: any[] = [];
         this.debugObstacles.clear();
 
-        const debugMat = new THREE.MeshBasicMaterial({ color: 0xff0000, wireframe: true, transparent: true, opacity: 0.2 });
-        const seen = new Set();
+        this._seen.clear();
 
         features.forEach(f => {
             if (!f.properties || !f.geometry || f.geometry.type !== 'Polygon') return;
 
             const id = f.id || Math.random().toString();
-            if (seen.has(id)) return;
-            seen.add(id);
+            if (this._seen.has(id)) return;
+            this._seen.add(id);
 
             const rawCoords = f.geometry.coordinates[0];
             if (!rawCoords || rawCoords.length < 3) return;
@@ -239,7 +239,7 @@ class DroneLayer implements mapboxgl.CustomLayerInterface {
             });
 
             const boxGeo = new THREE.BoxGeometry(widthMeters, height, depthMeters);
-            const boxMesh = new THREE.Mesh(boxGeo, debugMat);
+            const boxMesh = new THREE.Mesh(boxGeo, this._debugMat);
             boxMesh.rotation.x = Math.PI / 2;
 
             const group = new THREE.Group();
