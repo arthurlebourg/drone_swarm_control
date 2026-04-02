@@ -9,7 +9,7 @@ A 3D browser-based simulation of a drone swarm navigating through a city environ
 * **Frontend:** React, TypeScript, Zustand, Vite
 * **Rendering:** Mapbox GL JS, Three.js (Custom 3D layers)
 * **Simulation Logic:** Rust, WebAssembly (WASM), Web Workers
-
+ 
 ### Features
 
 * **Real-time Swarm Physics:** Simulates 500 drones using separation, attraction, and avoidance mechanics.

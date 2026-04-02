@@ -18,6 +18,7 @@ const MapComponent: FC = () => {
 
     const [isSelectionMode, setIsSelectionMode] = useState(false);
     const [selectionBox, setSelectionBox] = useState<{ startX: number, startY: number, currentX: number, currentY: number } | null>(null);
+    const pathCanvasRef = useRef<HTMLCanvasElement>(null);
 
     useStats()
 
@@ -62,9 +63,25 @@ const MapComponent: FC = () => {
                     'fill-extrusion-opacity': 0.8
                 }
             });
-
-            droneLayerRef.current = new DroneLayer();
+            droneLayerRef.current = new DroneLayer(pathCanvasRef.current);
             map.current.addLayer(droneLayerRef.current);
+
+            map.current.on('click', (e) => {
+                if (!droneLayerRef.current || isSelectionMode) return;
+
+                // Mapbox e.point is in CSS logical pixels. WebGL needs physical pixels.
+                const dpr = window.devicePixelRatio;
+                const physicalX = e.point.x * dpr;
+                const physicalY = e.point.y * dpr;
+
+                droneLayerRef.current.requestPick(physicalX, physicalY, (id) => {
+                    if (id !== null) {
+                        setSelectedDrones([id]); // Overwrite selection with picked drone
+                    } else {
+                        clearSelection(); // Clicked on empty space
+                    }
+                });
+            });
 
             const bounds = getSwarmBounds();
             map.current.fitBounds(bounds, {
@@ -97,27 +114,36 @@ const MapComponent: FC = () => {
 
         if (selectedDrones.length > 0) {
             let sumLng = 0, sumLat = 0;
+            let validCount = 0;
+
             selectedDrones.forEach(i => {
-                sumLng += swarmData[i].lng;
-                sumLat += swarmData[i].lat;
+                const drone = swarmData[i];
+                if (drone) { // <--- Safety guard
+                    sumLng += drone.lng;
+                    sumLat += drone.lat;
+                    validCount++;
+                }
             });
-            const centerLng = sumLng / selectedDrones.length;
-            const centerLat = sumLat / selectedDrones.length;
 
-            if (!targetMarkerRef.current) {
-                targetMarkerRef.current = new mapboxgl.Marker({ color: '#ff00ff', draggable: true })
-                    .setLngLat([centerLng, centerLat])
-                    .addTo(map.current);
+            if (validCount > 0) {
+                const centerLng = sumLng / validCount;
+                const centerLat = sumLat / validCount;
 
-                targetMarkerRef.current.on('drag', () => {
-                    const lngLat = targetMarkerRef.current!.getLngLat();
-                    droneLayerRef.current!.setTargetGPS(lngLat.lng, lngLat.lat);
-                });
-            } else {
-                targetMarkerRef.current.setLngLat([centerLng, centerLat]);
+                if (!targetMarkerRef.current) {
+                    targetMarkerRef.current = new mapboxgl.Marker({ color: '#ff00ff', draggable: true })
+                        .setLngLat([centerLng, centerLat])
+                        .addTo(map.current);
+
+                    targetMarkerRef.current.on('drag', () => {
+                        const lngLat = targetMarkerRef.current!.getLngLat();
+                        droneLayerRef.current!.setTargetGPS(lngLat.lng, lngLat.lat);
+                    });
+                } else {
+                    targetMarkerRef.current.setLngLat([centerLng, centerLat]);
+                }
+
+                droneLayerRef.current.setTargetGPS(centerLng, centerLat);
             }
-
-            droneLayerRef.current.setTargetGPS(centerLng, centerLat);
 
         } else {
             if (targetMarkerRef.current) {
@@ -242,6 +268,19 @@ const MapComponent: FC = () => {
             )}
 
             <div ref={mapContainer} style={{ width: '100%', height: '100%' }} />
+
+            <canvas
+                ref={pathCanvasRef}
+                style={{
+                    position: 'absolute',
+                    top: 0,
+                    left: 0,
+                    width: '100%',
+                    height: '100%',
+                    zIndex: 2,
+                    pointerEvents: 'none' // Ensures map panning/clicking passes through to Mapbox
+                }}
+            />
 
             <DroneSidebar />
         </div>

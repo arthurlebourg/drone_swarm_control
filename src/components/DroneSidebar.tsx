@@ -16,6 +16,7 @@ const DroneSidebar: FC = () => {
         const updateCoordinates = () => {
             selectedDrones.forEach((index) => {
                 const drone = swarmData[index];
+                if (!drone) return;
                 const latEl = latRefs.current[index];
                 const lngEl = lngRefs.current[index];
 

@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import mapboxgl from 'mapbox-gl';
+import { PathTracker } from './Pathtracker';
 
 const SWARM_SIZE = 500;
 const MUNICH_CENTER: [number, number] = [11.5827, 48.1350];
@@ -80,7 +81,18 @@ class DroneLayer implements mapboxgl.CustomLayerInterface {
     private worker: Worker;
     private latestPositions: Float32Array | null = null;
 
-    constructor() {
+    private pathTracker: PathTracker;
+    private canvas: HTMLCanvasElement | null = null;
+    private ctx: CanvasRenderingContext2D | null = null;
+    public selectedDrones: number[] = [];
+    private pickingScene: THREE.Scene;
+    private pickingTexture: THREE.WebGLRenderTarget;
+    private pickMesh1!: THREE.InstancedMesh;
+    private pickMesh2!: THREE.InstancedMesh;
+    private pendingPick: { x: number, y: number } | null = null;
+    private onPickCallback: ((id: number | null) => void) | null = null;
+
+    constructor(canvas: HTMLCanvasElement | null) {
         this.camera = new THREE.Camera();
         this.scene = new THREE.Scene();
 
@@ -130,6 +142,41 @@ class DroneLayer implements mapboxgl.CustomLayerInterface {
                 sharedBuffer: sharedBuffer
             }
         });
+        this.canvas = canvas;
+        if (this.canvas) this.ctx = this.canvas.getContext('2d');
+        this.pathTracker = new PathTracker(SWARM_SIZE, 200, 10000);
+
+        // --- Setup Picking Scene ---
+        this.pickingScene = new THREE.Scene();
+        // Use NearestFilter so colors don't blend at the edges of the drones
+        this.pickingTexture = new THREE.WebGLRenderTarget(1, 1, {
+            minFilter: THREE.NearestFilter,
+            magFilter: THREE.NearestFilter,
+            format: THREE.RGBAFormat,
+            // CRITICAL: Prevent Three.js from modifying our ID colors
+            colorSpace: THREE.LinearSRGBColorSpace
+        });
+
+        const pickingMaterial = new THREE.MeshBasicMaterial();
+        const armGeo1 = new THREE.BoxGeometry(1.6, 0.2, 0.15);
+        const armGeo2 = new THREE.BoxGeometry(0.2, 1.6, 0.15);
+
+        this.pickMesh1 = new THREE.InstancedMesh(armGeo1, pickingMaterial, SWARM_SIZE);
+        this.pickMesh2 = new THREE.InstancedMesh(armGeo2, pickingMaterial, SWARM_SIZE);
+        this.pickMesh1.frustumCulled = false;
+        this.pickMesh2.frustumCulled = false;
+
+        // Assign a unique Hex color to each drone (id + 1, so 0 remains background)
+        for (let i = 0; i < SWARM_SIZE; i++) {
+            const color = new THREE.Color();
+            color.setHex(i + 1);
+            this.pickMesh1.setColorAt(i, color);
+            this.pickMesh2.setColorAt(i, color);
+        }
+
+        this.pickingScene.add(this.pickMesh1);
+        this.pickingScene.add(this.pickMesh2);
+
     }
 
     private initInstancedMeshes() {
@@ -275,9 +322,67 @@ class DroneLayer implements mapboxgl.CustomLayerInterface {
         this.worker.postMessage({ type: 'SET_TARGET', payload: { x: localX, y: localY, z: 50 } });
     }
 
-    public updateSelection(indices: number[]) {
-        this.highlightDrones(indices);
+    public requestPick(x: number, y: number, callback: (id: number | null) => void) {
+        this.pendingPick = { x, y };
+        this.onPickCallback = callback;
+        this.map?.triggerRepaint(); // Force next frame to process the pick
+    }
 
+    private performPick(x: number, y: number, width: number, height: number) {
+        if (!this.renderer) return;
+
+        // 1. Sync matrices from visual meshes to picking meshes
+        this.pickMesh1.instanceMatrix.copy(this.meshArm1.instanceMatrix);
+        this.pickMesh1.instanceMatrix.needsUpdate = true;
+        this.pickMesh2.instanceMatrix.copy(this.meshArm2.instanceMatrix);
+        this.pickMesh2.instanceMatrix.needsUpdate = true;
+
+        if (this.pickingTexture.width !== width || this.pickingTexture.height !== height) {
+            this.pickingTexture.setSize(width, height);
+        }
+
+        // 2. Save current Mapbox WebGL state
+        const oldTarget = this.renderer.getRenderTarget();
+        const oldClearColor = new THREE.Color();
+        this.renderer.getClearColor(oldClearColor);
+        const oldClearAlpha = this.renderer.getClearAlpha();
+
+        // 3. Render offscreen picking texture
+        this.renderer.setRenderTarget(this.pickingTexture);
+        this.renderer.setClearColor(0x000000, 0); // Black = ID 0
+        this.renderer.clear();
+        this.renderer.render(this.pickingScene, this.camera);
+
+        // 4. Read the single pixel under the mouse
+        const pixelBuffer = new Uint8Array(4);
+        // Note: WebGL reads from bottom-left, CSS/Mouse is top-left
+        this.renderer.readRenderTargetPixels(this.pickingTexture, x, height - y, 1, 1, pixelBuffer);
+
+        // 5. Restore Mapbox state
+        this.renderer.setRenderTarget(oldTarget);
+        this.renderer.setClearColor(oldClearColor, oldClearAlpha);
+
+        // 6. Decode color back into ID
+        const id = (pixelBuffer[0] << 16) | (pixelBuffer[1] << 8) | (pixelBuffer[2]);
+
+        if (this.onPickCallback) {
+            if (id === 0) {
+                this.onPickCallback(null); // Clicked the black background
+            } else {
+                const actualId = id - 1;
+                // Verify the ID is within the valid swarm range
+                if (actualId >= 0 && actualId < SWARM_SIZE) {
+                    this.onPickCallback(actualId);
+                } else {
+                    this.onPickCallback(null); // Garbage data, ignore it
+                }
+            }
+        }
+    }
+
+    public updateSelection(indices: number[]) {
+        this.selectedDrones = indices; // Sync state to layer
+        this.highlightDrones(indices);
         const selectedArray = new Uint32Array(indices);
         this.worker.postMessage({ type: 'UPDATE_SELECTION', payload: selectedArray });
     }
@@ -352,6 +457,12 @@ class DroneLayer implements mapboxgl.CustomLayerInterface {
             return;
         }
 
+        if (this.pendingPick) {
+            this.performPick(this.pendingPick.x, this.pendingPick.y, _gl.canvas.width, _gl.canvas.height);
+            this.pendingPick = null;
+            this.onPickCallback = null;
+        }
+
         const centerLngLat = this.centerMercator.toLngLat();
         const groundElevation = this.map.queryTerrainElevation([centerLngLat.lng, centerLngLat.lat]) || 520;
 
@@ -378,6 +489,16 @@ class DroneLayer implements mapboxgl.CustomLayerInterface {
 
         this.renderer.resetState();
         this.renderer.render(this.scene, this.camera);
+
+        if (this.canvas && this.ctx) {
+            if (this.canvas.width !== _gl.canvas.width || this.canvas.height !== _gl.canvas.height) {
+                this.canvas.width = _gl.canvas.width;
+                this.canvas.height = _gl.canvas.height;
+            }
+            this.pathTracker.recordPositions(this.latestPositions, performance.now(), groundElevation);
+            this.pathTracker.draw(this.ctx, this.camera, this.canvas.width, this.canvas.height, performance.now(), this.selectedDrones);
+        }
+
         this.map.triggerRepaint();
     }
 }
